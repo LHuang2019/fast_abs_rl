@@ -2,6 +2,8 @@
 import argparse
 import json
 import os
+import sys
+import nltk
 from os.path import join
 from datetime import timedelta
 from time import time
@@ -21,6 +23,35 @@ from data.batcher import tokenize
 from decoding import Abstractor, RLExtractor, DecodeDataset, BeamAbstractor
 from decoding import make_html_safe
 
+def preprocess_json(article_dir, out_json_dir):
+    tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    
+    if not article_dir.endswith('/'):
+        article_dir += '/'
+
+    counter = 0
+    for filename in os.listdir(article_dir):
+        write_to_json(article_dir + filename, out_json_dir + str(counter) + '.json', tokenizer)
+        counter += 1
+
+def write_to_json(article_path, out_json, tokenizer):
+    """article and abstract are list of string 
+       out_json : output file name 
+    """
+    with open(article_path) as f:
+        article = f.read()
+
+    article_lines = tokenizer.tokenize(article) 
+    article = ' '.join(article_lines)
+    
+    with open(out_json, 'wb') as writer:
+        # Write to tf.Example
+        js_example = {}
+        js_example['id'] = " "
+        js_example['article'] = article_lines
+        js_example['abstract'] = " "
+        js_serialized = json.dumps(js_example, indent=4).encode()
+        writer.write(js_serialized)
 
 def decode(save_path, model_dir, split, batch_size,
            beam_size, diverse, max_len, cuda):
@@ -160,10 +191,16 @@ if __name__ == '__main__':
 
     parser.add_argument('--no-cuda', action='store_true',
                         help='disable GPU training')
+
+    # preprocessing json args
+    parser.add_argument('--article_dir', required=True)
+    parser.add_argument('--out_json_dir', required=True)
+
     args = parser.parse_args()
     args.cuda = torch.cuda.is_available() and not args.no_cuda
 
     data_split = 'test' if args.test else 'val'
+    preprocess_json(args.article_dir, args.out_json_dir)
     decode(args.path, args.model_dir,
            data_split, args.batch, args.beam, args.div,
            args.max_dec_word, args.cuda)
