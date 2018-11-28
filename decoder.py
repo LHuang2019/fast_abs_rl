@@ -1,4 +1,5 @@
 """ run decoding of rnn-ext + abs + RL (+ rerank)"""
+import re
 import argparse
 import json
 import os
@@ -18,40 +19,61 @@ import torch
 from torch.utils.data import DataLoader
 from torch import multiprocessing as mp
 
-from data.batcher import tokenize
+from .data.batcher import tokenize
 
-from decoding import Abstractor, RLExtractor, DecodeDataset, BeamAbstractor
-from decoding import make_html_safe
+from .decoding import Abstractor, RLExtractor, DecodeDataset, BeamAbstractor
+from .decoding import make_html_safe
 
-import csv
-
-def preprocess_json(csv_dir, out_json_dir):
+def preprocess_json(data_list):
     tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
 
-    with open(csv_dir, 'r') as f:
-        reader = csv.reader(f)
-        csv_list = list(reader)
-
     counter = 0
-    for s in csv_list:
-        write_to_json(s[0], out_json_dir + str(counter) + '.json', tokenizer)
-        counter += 1
+    json_list = []
+    for article in data_list:
+        article_lines = tokenizer.tokenize(article)
 
-def write_to_json(article, out_json, tokenizer):
-    article_lines = tokenizer.tokenize(article) 
-    article = ' '.join(article_lines)
-    
-    with open(out_json, 'wb') as writer:
-        # Write to tf.Example
         js_example = {}
         js_example['id'] = " "
         js_example['article'] = article_lines
         js_example['abstract'] = " "
-        js_serialized = json.dumps(js_example, indent=4).encode()
-        writer.write(js_serialized)
+        json_list.append(js_example)
 
-def decode(save_path, model_dir, split, batch_size,
-           beam_size, diverse, max_len, cuda):
+    return json_list
+
+def summary_postprocessing(summary_list):
+
+    sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+
+    processed_list = []
+
+    for summary in summary_list:
+        sentences = sent_tokenizer.tokenize(summary)
+
+        # capitalize first words of every sentences
+        sentences = [sent.capitalize() for sent in sentences]
+        text = ' '.join(sentences)
+
+        # remove spaces before punctuations
+        text = re.sub(r'\s([,?.!"](?:\s|$))', r'\1', text)
+
+        # remove redundant punctuations
+        text = re.sub(r'[\?\.\!\,]+(?=[\?\.\!\,])', '', text)
+
+        processed_list.append(text)
+
+    return processed_list
+
+def decode(data_list):
+    
+    data_list = preprocess_json(data_list)
+
+    cuda = torch.cuda.is_available()
+    model_dir = os.path.dirname(os.path.realpath(__file__)) + '/pretrained/'
+    batch_size = 32
+    beam_size = 5
+    diverse = 1.0
+    max_len = 30
+
     start = time()
     # setup model
     with open(join(model_dir, 'meta.json')) as f:
@@ -74,7 +96,7 @@ def decode(save_path, model_dir, split, batch_size,
     def coll(batch):
         articles = list(filter(bool, batch))
         return articles
-    dataset = DecodeDataset(split)
+    dataset = DecodeDataset(data_list)
 
     n_data = len(dataset)
     loader = DataLoader(
@@ -82,18 +104,8 @@ def decode(save_path, model_dir, split, batch_size,
         collate_fn=coll
     )
 
-    # prepare save paths and logs
-    os.makedirs(join(save_path, 'output'))
-    dec_log = {}
-    dec_log['abstractor'] = meta['net_args']['abstractor']
-    dec_log['extractor'] = meta['net_args']['extractor']
-    dec_log['rl'] = True
-    dec_log['split'] = split
-    dec_log['beam'] = beam_size
-    dec_log['diverse'] = diverse
-    with open(join(save_path, 'log.json'), 'w') as f:
-        json.dump(dec_log, f, indent=4)
-
+    summary_list = []
+    
     # Decoding
     i = 0
     with torch.no_grad():
@@ -117,17 +129,18 @@ def decode(save_path, model_dir, split, batch_size,
             else:
                 dec_outs = abstractor(ext_arts)
             assert i == batch_size*i_debug
+
             for j, n in ext_inds:
                 decoded_sents = [' '.join(dec) for dec in dec_outs[j:j+n]]
-                with open(join(save_path, 'output/{}.dec'.format(i)),
-                          'w') as f:
-                    f.write(make_html_safe(('\n'.join(decoded_sents).encode('ascii', 'ignore')).decode('ascii')))
+                summary_list.append(make_html_safe(('\n'.join(decoded_sents).encode('ascii', 'ignore')).decode('ascii')))
                 i += 1
                 print('{}/{} ({:.2f}%) decoded in {} seconds\r'.format(
                     i, n_data, i/n_data*100,
                     timedelta(seconds=int(time()-start))
                 ), end='')
+
     print()
+    return summary_postprocessing(summary_list)
 
 _PRUNE = defaultdict(
     lambda: 2,
@@ -163,41 +176,3 @@ def _compute_score(hyps):
     repeat = sum(c-1 for g, c in all_cnt.items() if c > 1)
     lp = sum(h.logprob for h in hyps) / sum(len(h.sequence) for h in hyps)
     return (-repeat, lp)
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='run decoding of the full model (RL)')
-    parser.add_argument('--path', required=True, help='path to store/eval')
-    parser.add_argument('--model_dir', help='root of the full model')
-
-    # dataset split
-    data = parser.add_mutually_exclusive_group(required=True)
-    data.add_argument('--val', action='store_true', help='use validation set')
-    data.add_argument('--test', action='store_true', help='use test set')
-
-    # decode options
-    parser.add_argument('--batch', type=int, action='store', default=32,
-                        help='batch size of faster decoding')
-    parser.add_argument('--beam', type=int, action='store', default=1,
-                        help='beam size for beam-search (reranking included)')
-    parser.add_argument('--div', type=float, action='store', default=1.0,
-                        help='diverse ratio for the diverse beam-search')
-    parser.add_argument('--max_dec_word', type=int, action='store', default=30,
-                        help='maximun words to be decoded for the abstractor')
-
-    parser.add_argument('--no-cuda', action='store_true',
-                        help='disable GPU training')
-
-    # preprocessing json args
-    parser.add_argument('--csv_dir', required=True)
-    parser.add_argument('--out_json_dir', required=True)
-
-    args = parser.parse_args()
-    args.cuda = torch.cuda.is_available() and not args.no_cuda
-
-    data_split = 'test' if args.test else 'val'
-    preprocess_json(args.csv_dir, args.out_json_dir)
-    decode(args.path, args.model_dir,
-           data_split, args.batch, args.beam, args.div,
-           args.max_dec_word, args.cuda)

@@ -10,24 +10,17 @@ from cytoolz import curry
 
 import torch
 
-from utils import PAD, UNK, START, END
-from model.copy_summ import CopySumm
-from model.extract import ExtractSumm, PtrExtractSumm
-from model.rl import ActorCritic
-from data.batcher import conver2id, pad_batch_tensorize
-from data.data import CnnDmDataset
-
-
-try:
-    DATASET_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+from .utils import PAD, UNK, START, END
+from .model.copy_summ import CopySumm
+from .model.extract import ExtractSumm, PtrExtractSumm
+from .model.rl import ActorCritic
+from .data.batcher import conver2id, pad_batch_tensorize
+from .data.data import CnnDmDataset
 
 class DecodeDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
-    def __init__(self, split):
-        assert split in ['val', 'test']
-        super().__init__(split, DATASET_DIR)
+    def __init__(self, data_list):
+        super().__init__(data_list)
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
